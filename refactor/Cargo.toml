@@ -1,4 +1,5 @@
 [workspace]
 members = [
+    "gdnative",
     "gdnative-sys",
 ]
