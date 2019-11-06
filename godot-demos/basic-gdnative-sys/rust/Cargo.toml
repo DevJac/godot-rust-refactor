@@ -8,4 +8,5 @@ edition = "2018"
 crate-type = ["cdylib"]
 
 [dependencies]
+generational-arena = "0.2.4"
 gdnative-sys = { path = "../../../refactor/gdnative-sys" }
