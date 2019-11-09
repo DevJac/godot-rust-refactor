@@ -9,19 +9,25 @@ fn main() {
         .unwrap();
     let out_dir = path::PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings.write_to_file(out_dir.join("bindings.rs")).unwrap();
-    api_wrapper::generate(out_dir);
+    api_wrapper::generate(
+        &"../../godot_headers/gdnative_api.json",
+        &out_dir,
+        "api_wrapper.rs",
+    );
 }
 
 mod api_wrapper {
     use lazy_static::lazy_static;
+    use proc_macro2::{Ident, TokenStream};
+    use quote::{format_ident, quote, ToTokens};
     use regex::Regex;
-    use std::fmt::Write as _;
+    use std::convert::AsRef;
     use std::fs::File;
-    use std::io::Write;
+    use std::io::Write as _;
     use std::path;
 
     #[derive(Debug, serde::Deserialize)]
-    struct ApiCategories {
+    struct ApiRoot {
         core: Api,
         extensions: Vec<Api>,
     }
@@ -56,7 +62,7 @@ mod api_wrapper {
         name: String,
     }
 
-    impl ApiCategories {
+    impl ApiRoot {
         fn all_apis(&self) -> Vec<&Api> {
             let mut result = Vec::new();
             result.extend(self.core.nexts());
@@ -83,170 +89,183 @@ mod api_wrapper {
     }
 
     impl Function {
-        fn rust_args_with_types(&self) -> String {
-            self.arguments
-                .iter()
-                .map(|arg| format!("{}: {}", arg.adjusted_name(), arg.rust_type()))
-                .collect::<Vec<String>>()
-                .join(",")
+        fn rust_name(&self) -> Ident {
+            format_ident!("{}", self.name)
         }
 
-        fn rust_args_without_types(&self) -> String {
-            self.arguments
-                .iter()
-                .map(|arg| arg.adjusted_name())
-                .collect::<Vec<String>>()
-                .join(",")
+        fn rust_args_with_types(&self) -> TokenStream {
+            let arg = &self.arguments;
+            quote!(#(#arg),*)
         }
 
-        fn rust_return_type(&self) -> String {
+        fn rust_args_without_types(&self) -> TokenStream {
+            let rust_name = self.arguments.iter().map(|arg| arg.rust_name());
+            quote!(#(#rust_name),*)
+        }
+
+        fn rust_return_type(&self) -> TokenStream {
             c_type_to_rust_type(&self.return_type)
         }
+    }
 
-        fn full_rust_type(&self) -> String {
-            format!(
-                r#"unsafe extern "C" fn({args}) -> {return_type}"#,
-                args = self.rust_args_with_types(),
-                return_type = self.rust_return_type()
-            )
+    impl ToTokens for Function {
+        fn to_tokens(&self, tokens: &mut TokenStream) {
+            let args = self.rust_args_with_types();
+            let return_type = self.rust_return_type();
+            tokens.extend(quote!(unsafe extern "C" fn(#args) -> #return_type));
         }
     }
 
     impl Argument {
-        fn adjusted_name(&self) -> String {
+        fn rust_name(&self) -> Ident {
             match self.name.trim_start_matches("p_") {
-                "self" => "self_".to_string(),
-                arg_name => arg_name.to_string(),
+                "self" => format_ident!("{}", "self_"),
+                arg_name => format_ident!("{}", arg_name),
             }
         }
 
-        fn rust_type(&self) -> String {
+        fn rust_type(&self) -> TokenStream {
             c_type_to_rust_type(&self.type_)
         }
     }
 
-    fn godot_api_struct(type_: &str, version_major: u32, version_minor: u32) -> String {
+    impl ToTokens for Argument {
+        fn to_tokens(&self, tokens: &mut TokenStream) {
+            let name = self.rust_name();
+            let type_ = self.rust_type();
+            tokens.extend(quote!(#name: #type_));
+        }
+    }
+
+    fn godot_api_struct(type_: &str, version_major: u32, version_minor: u32) -> Ident {
         match (type_, version_major, version_minor) {
-            ("CORE", 1, 0) => "godot_gdnative_core_api_struct".to_string(),
-            ("CORE", maj, min) => format!("godot_gdnative_core_{}_{}_api_struct", maj, min),
-            ("NATIVESCRIPT", 1, 0) => "godot_gdnative_ext_nativescript_api_struct".to_string(),
+            ("CORE", 1, 0) => format_ident!("godot_gdnative_core_api_struct"),
+            ("CORE", maj, min) => format_ident!("godot_gdnative_core_{}_{}_api_struct", maj, min),
+            ("NATIVESCRIPT", 1, 0) => format_ident!("godot_gdnative_ext_nativescript_api_struct"),
             ("NATIVESCRIPT", maj, min) => {
-                format!("godot_gdnative_ext_nativescript_{}_{}_api_struct", maj, min)
+                format_ident!("godot_gdnative_ext_nativescript_{}_{}_api_struct", maj, min)
             }
-            ("PLUGINSCRIPT", 1, 0) => "godot_gdnative_ext_pluginscript_api_struct".to_string(),
-            ("ANDROID", 1, 0) => "godot_gdnative_ext_android_api_struct".to_string(),
-            ("ARVR", 1, 1) => "godot_gdnative_ext_arvr_api_struct".to_string(),
-            ("VIDEODECODER", 0, 1) => "godot_gdnative_ext_videodecoder_api_struct".to_string(),
-            ("NET", 3, 1) => "godot_gdnative_ext_net_api_struct".to_string(),
+            ("PLUGINSCRIPT", 1, 0) => format_ident!("godot_gdnative_ext_pluginscript_api_struct"),
+            ("ANDROID", 1, 0) => format_ident!("godot_gdnative_ext_android_api_struct"),
+            ("ARVR", 1, 1) => format_ident!("godot_gdnative_ext_arvr_api_struct"),
+            ("VIDEODECODER", 0, 1) => format_ident!("godot_gdnative_ext_videodecoder_api_struct"),
+            ("NET", 3, 1) => format_ident!("godot_gdnative_ext_net_api_struct"),
             api => panic!("Unknown API type and version: {:?}", api),
         }
     }
 
-    fn godot_api_type_ident(type_: &str) -> String {
+    fn godot_api_type_ident(type_: &str) -> Ident {
         match type_ {
-            "CORE" => "GDNATIVE_API_TYPES_GDNATIVE_CORE".to_string(),
-            "NATIVESCRIPT" => "GDNATIVE_API_TYPES_GDNATIVE_EXT_NATIVESCRIPT".to_string(),
-            "PLUGINSCRIPT" => "GDNATIVE_API_TYPES_GDNATIVE_EXT_PLUGINSCRIPT".to_string(),
-            "ANDROID" => "GDNATIVE_API_TYPES_GDNATIVE_EXT_ANDROID".to_string(),
-            "ARVR" => "GDNATIVE_API_TYPES_GDNATIVE_EXT_ARVR".to_string(),
-            "VIDEODECODER" => "GDNATIVE_API_TYPES_GDNATIVE_EXT_VIDEODECODER".to_string(),
-            "NET" => "GDNATIVE_API_TYPES_GDNATIVE_EXT_NET".to_string(),
+            "CORE" => format_ident!("GDNATIVE_API_TYPES_GDNATIVE_CORE"),
+            "NATIVESCRIPT" => format_ident!("GDNATIVE_API_TYPES_GDNATIVE_EXT_NATIVESCRIPT"),
+            "PLUGINSCRIPT" => format_ident!("GDNATIVE_API_TYPES_GDNATIVE_EXT_PLUGINSCRIPT"),
+            "ANDROID" => format_ident!("GDNATIVE_API_TYPES_GDNATIVE_EXT_ANDROID"),
+            "ARVR" => format_ident!("GDNATIVE_API_TYPES_GDNATIVE_EXT_ARVR"),
+            "VIDEODECODER" => format_ident!("GDNATIVE_API_TYPES_GDNATIVE_EXT_VIDEODECODER"),
+            "NET" => format_ident!("GDNATIVE_API_TYPES_GDNATIVE_EXT_NET"),
             other => panic!("Unknown API type: {:?}", other),
         }
     }
 
-    pub fn generate(out_dir: path::PathBuf) {
-        let api_json_file = File::open("../../godot_headers/gdnative_api.json").unwrap();
-        let api_root: ApiCategories = serde_json::from_reader(api_json_file).unwrap();
-        let mut wrapper_file = File::create(out_dir.join("api_wrapper.rs")).unwrap();
-        writeln!(
-            wrapper_file,
-            "pub struct GodotApi{{{}}}",
-            api_function_names_and_types(&api_root)
-        )
-        .unwrap();
-        writeln!(
-            wrapper_file,
-            "impl GodotApi{{{api_constructor}{field_wrappers}}}",
-            api_constructor = api_constructor(&api_root),
-            field_wrappers = field_wrappers(&api_root)
-        )
-        .unwrap();
+    pub fn generate(
+        from_json: &dyn AsRef<path::Path>,
+        to: &dyn AsRef<path::Path>,
+        file_name: &str,
+    ) {
+        let from_json = from_json.as_ref();
+        let to = to.as_ref();
+        let api_json_file = File::open(from_json).expect(&format!("No such file: {:?}", from_json));
+        let api_root: ApiRoot = serde_json::from_reader(api_json_file)
+            .expect(&"File ({:?}) does not contain expected JSON");
+        let struct_fields = api_function_names_and_types(&api_root);
+        let impl_constructor = api_constructor(&api_root);
+        let impl_field_wrappers = field_wrapper_functions(&api_root);
+        let wrapper = quote! {
+            pub struct GodotApi{
+                #struct_fields
+            }
+            impl GodotApi {
+                #impl_constructor
+                #impl_field_wrappers
+            }
+        };
+        let mut wrapper_file = File::create(to.join(file_name)).expect(&format!(
+            "Couldn't create output file: {:?}",
+            to.join(file_name)
+        ));
+        write!(wrapper_file, "{}", wrapper).unwrap();
     }
 
-    fn api_function_names_and_types(api: &ApiCategories) -> String {
-        let mut result = String::new();
+    fn api_function_names_and_types(api: &ApiRoot) -> TokenStream {
+        let mut result = TokenStream::new();
         for api in api.all_apis() {
             for function in &api.functions {
-                writeln!(result, "{}: {},", function.name, function.full_rust_type()).unwrap();
+                let function_name = function.rust_name();
+                result.extend(quote!(#function_name: #function,));
             }
         }
         result
     }
 
-    fn api_constructor(api: &ApiCategories) -> String {
-        let mut result = String::new();
-        writeln!(result, "pub unsafe fn from_api_struct(core_api_struct: *const godot_gdnative_core_api_struct) -> Self {{").unwrap();
+    fn api_constructor(api: &ApiRoot) -> TokenStream {
+        let mut godot_apis = TokenStream::new();
+        let mut constructed_struct_fields = TokenStream::new();
         for api in api.all_apis() {
-            writeln!(
-                result,
-                "let {}_{}_{} = find_api_ptr(core_api_struct, {}, {}, {}) as *const {};",
-                api.type_,
-                api.version.major,
-                api.version.minor,
-                godot_api_type_ident(&api.type_),
-                api.version.major,
-                api.version.minor,
-                godot_api_struct(&api.type_, api.version.major, api.version.minor),
-            )
-            .unwrap();
-        }
-        writeln!(result, "GodotApi {{").unwrap();
-        for api in api.all_apis() {
+            let i = format_ident!("{}_{}_{}", api.type_, api.version.major, api.version.minor);
+            let gd_api_type = godot_api_type_ident(&api.type_);
+            let v_maj = api.version.major;
+            let v_min = api.version.minor;
+            let gd_api_struct = godot_api_struct(&api.type_, api.version.major, api.version.minor);
+            godot_apis.extend(quote!{
+                let #i = find_api_ptr(core_api_struct, #gd_api_type, #v_maj, #v_min) as *const #gd_api_struct;
+            });
             for function in &api.functions {
-                writeln!(
-                    result,
-                    r#"{}: (*{}_{}_{}).{}.expect("Couldn't find function: ({}, {}, {})"),"#,
-                    function.name,
-                    api.type_,
-                    api.version.major,
-                    api.version.minor,
-                    function.name,
-                    api.type_,
-                    function.name,
-                    godot_api_struct(&api.type_, api.version.major, api.version.minor),
-                )
-                .unwrap();
+                let function_name = function.rust_name();
+                let expect_message = format!(
+                    "Couldn't find function: ({}, {}, {}, {})",
+                    api.type_, gd_api_type, function_name, gd_api_struct
+                );
+                constructed_struct_fields.extend(quote! {
+                    #function_name: (*#i).#function_name.expect(#expect_message),
+                });
             }
         }
-        writeln!(result, "}}}}").unwrap();
-        result
+        quote! {
+            pub unsafe fn from_api_struct(core_api_struct: *const godot_gdnative_core_api_struct) -> Self {
+                #godot_apis
+                GodotApi{
+                    #constructed_struct_fields
+                }
+            }
+        }
     }
 
-    fn field_wrappers(api: &ApiCategories) -> String {
-        let mut result = String::new();
+    fn field_wrapper_functions(api: &ApiRoot) -> TokenStream {
+        let mut result = TokenStream::new();
         for api in api.all_apis() {
             for function in &api.functions {
-                writeln!(
-                    result,
-                    "pub unsafe fn {wrapper_name}(&self, {args}) -> {return_type} {{(self.{field_name})({arg_names})}}",
-                    wrapper_name = function.name,
-                    args = function.rust_args_with_types(),
-                    return_type = function.rust_return_type(),
-                    field_name = function.name,
-                    arg_names = function.rust_args_without_types(),
-                )
-                .unwrap();
+                let wrapper_name = function.rust_name();
+                let args = function.rust_args_with_types();
+                let return_type = function.rust_return_type();
+                let field_name = function.rust_name();
+                let arg_names = function.rust_args_without_types();
+                result.extend(quote! {
+                    pub unsafe fn #wrapper_name(&self, #args) -> #return_type {
+                        (self.#field_name)(#arg_names)
+                    }
+                });
             }
         }
         result
     }
 
-    fn c_type_to_rust_type(c_type: &str) -> String {
+    fn c_type_to_rust_type(c_type: &str) -> TokenStream {
         lazy_static! {
             static ref RE: Regex = Regex::new(r"(const )?\s*([\w\s]+?)\s*([\s\*]*)$").unwrap();
         }
-        let caps = RE.captures(c_type).unwrap();
+        let caps = RE
+            .captures(c_type)
+            .expect("Godot's API JSON file contains unexpected C types");
         let ptr_count = caps
             .get(3)
             .unwrap()
@@ -255,35 +274,37 @@ mod api_wrapper {
             .filter(|c| c == &'*')
             .count();
         let rust_ptrs = match (ptr_count, caps.get(1).is_some()) {
-            (0, _) => "",
-            (1, true) => "*const ",
-            (1, false) => "*mut ",
-            (2, true) => "*mut *const ",
+            (0, _) => quote!(),
+            (1, true) => quote!(*const ),
+            (1, false) => quote!(*mut ),
+            (2, true) => quote!(*mut *const ),
             _ => panic!("Unknown C type: {:?}", c_type),
         };
-        let godot_raw_type = caps.get(2).unwrap().as_str();
-        let rust_type = match godot_raw_type {
+        let rust_type = match caps.get(2).unwrap().as_str() {
             "void" => {
                 if ptr_count == 0 {
-                    "()".to_string()
+                    quote!(())
                 } else {
-                    "std::ffi::c_void".to_string()
+                    quote!(std::ffi::c_void)
                 }
             }
-            "bool" => "bool".to_string(),
-            "uint8_t" => "u8".to_string(),
-            "uint32_t" => "u32".to_string(),
-            "uint64_t" => "u64".to_string(),
-            "int64_t" => "i64".to_string(),
-            "int" => "std::os::raw::c_int".to_string(),
-            "double" => "std::os::raw::c_double".to_string(),
-            "char" => "std::os::raw::c_char".to_string(),
-            "signed char" => "std::os::raw::c_schar".to_string(),
-            "size_t" => "usize".to_string(),
-            "JNIEnv" => "std::ffi::c_void".to_string(),
-            "jobject" => "*mut std::ffi::c_void".to_string(),
-            raw_type => raw_type.to_string(),
+            "bool" => quote!(bool),
+            "uint8_t" => quote!(u8),
+            "uint32_t" => quote!(u32),
+            "uint64_t" => quote!(u64),
+            "int64_t" => quote!(i64),
+            "int" => quote!(std::os::raw::c_int),
+            "double" => quote!(std::os::raw::c_double),
+            "char" => quote!(std::os::raw::c_char),
+            "signed char" => quote!(std::os::raw::c_schar),
+            "size_t" => quote!(usize),
+            "JNIEnv" => quote!(std::ffi::c_void),
+            "jobject" => quote!(*mut std::ffi::c_void),
+            godot_type => {
+                let i = format_ident!("{}", godot_type);
+                quote!(#i)
+            }
         };
-        format!("{}{}", rust_ptrs, rust_type)
+        quote!(#rust_ptrs #rust_type)
     }
 }
