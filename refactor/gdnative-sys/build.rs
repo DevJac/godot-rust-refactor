@@ -90,7 +90,7 @@ mod api_wrapper {
         fn macro_ident(&self) -> Ident {
             format_ident!(
                 "{}_{}_{}",
-                self.type_,
+                self.type_.to_lowercase(),
                 self.version.major,
                 self.version.minor
             )
@@ -219,7 +219,7 @@ mod api_wrapper {
             .map(|api| {
                 let field = api.macro_ident();
                 let godot_api_struct = api.godot_api_struct();
-                quote!(#field: *const #godot_api_struct,)
+                quote!(#field: #godot_api_struct,)
             })
             .collect()
     }
@@ -233,7 +233,7 @@ mod api_wrapper {
             let v_min = api.version.minor;
             let gd_api_struct = api.godot_api_struct();
             godot_api_struct_fields.extend(quote!{
-                #field: find_api_ptr(core_api_struct, #gd_api_type, #v_maj, #v_min) as *const #gd_api_struct,
+                #field: *(find_api_ptr(core_api_struct, #gd_api_type, #v_maj, #v_min) as *const #gd_api_struct),
             });
         }
         quote! {
@@ -255,13 +255,13 @@ mod api_wrapper {
                 let api_struct_field = api.macro_ident();
                 let arg_names = function.rust_args_without_types();
                 let expect_msg = format!(
-                    "API function mission: {}.{}",
+                    "API function missing: {}.{}",
                     api.godot_api_struct(),
                     function_name
                 );
                 result.extend(quote! {
                     pub unsafe fn #function_name(&self, #args) -> #return_type {
-                        (*self.#api_struct_field).#function_name.expect(#expect_msg)(#arg_names)
+                        self.#api_struct_field.#function_name.expect(#expect_msg)(#arg_names)
                     }
                 });
             }
