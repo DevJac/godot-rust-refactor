@@ -86,6 +86,23 @@ mod api_wrapper {
             }
             result
         }
+
+        fn macro_ident(&self) -> Ident {
+            format_ident!(
+                "{}_{}_{}",
+                self.type_,
+                self.version.major,
+                self.version.minor
+            )
+        }
+
+        fn godot_api_type(&self) -> Ident {
+            godot_api_type_ident(&self.type_)
+        }
+
+        fn godot_api_struct(&self) -> Ident {
+            godot_api_struct_ident(&self.type_, self.version.major, self.version.minor)
+        }
     }
 
     impl Function {
@@ -137,7 +154,7 @@ mod api_wrapper {
         }
     }
 
-    fn godot_api_struct(type_: &str, version_major: u32, version_minor: u32) -> Ident {
+    fn godot_api_struct_ident(type_: &str, version_major: u32, version_minor: u32) -> Ident {
         match (type_, version_major, version_minor) {
             ("CORE", 1, 0) => format_ident!("godot_gdnative_core_api_struct"),
             ("CORE", maj, min) => format_ident!("godot_gdnative_core_{}_{}_api_struct", maj, min),
@@ -177,16 +194,16 @@ mod api_wrapper {
         let api_json_file = File::open(from_json).expect(&format!("No such file: {:?}", from_json));
         let api_root: ApiRoot = serde_json::from_reader(api_json_file)
             .expect(&"File ({:?}) does not contain expected JSON");
-        let struct_fields = api_function_names_and_types(&api_root);
+        let struct_fields = godot_api_struct_fields(&api_root);
         let impl_constructor = api_constructor(&api_root);
-        let impl_field_wrappers = field_wrapper_functions(&api_root);
+        let impl_api_functions = api_wrapper_functions(&api_root);
         let wrapper = quote! {
             pub struct GodotApi{
                 #struct_fields
             }
             impl GodotApi {
                 #impl_constructor
-                #impl_field_wrappers
+                #impl_api_functions
             }
         };
         let mut wrapper_file = File::create(to.join(file_name)).expect(&format!(
@@ -196,62 +213,55 @@ mod api_wrapper {
         write!(wrapper_file, "{}", wrapper).unwrap();
     }
 
-    fn api_function_names_and_types(api: &ApiRoot) -> TokenStream {
-        let mut result = TokenStream::new();
-        for api in api.all_apis() {
-            for function in &api.functions {
-                let function_name = function.rust_name();
-                result.extend(quote!(#function_name: #function,));
-            }
-        }
-        result
+    fn godot_api_struct_fields(api: &ApiRoot) -> TokenStream {
+        api.all_apis()
+            .iter()
+            .map(|api| {
+                let field = api.macro_ident();
+                let godot_api_struct = api.godot_api_struct();
+                quote!(#field: *const #godot_api_struct,)
+            })
+            .collect()
     }
 
     fn api_constructor(api: &ApiRoot) -> TokenStream {
-        let mut godot_apis = TokenStream::new();
-        let mut constructed_struct_fields = TokenStream::new();
+        let mut godot_api_struct_fields = TokenStream::new();
         for api in api.all_apis() {
-            let i = format_ident!("{}_{}_{}", api.type_, api.version.major, api.version.minor);
-            let gd_api_type = godot_api_type_ident(&api.type_);
+            let field = api.macro_ident();
+            let gd_api_type = api.godot_api_type();
             let v_maj = api.version.major;
             let v_min = api.version.minor;
-            let gd_api_struct = godot_api_struct(&api.type_, api.version.major, api.version.minor);
-            godot_apis.extend(quote!{
-                let #i = find_api_ptr(core_api_struct, #gd_api_type, #v_maj, #v_min) as *const #gd_api_struct;
+            let gd_api_struct = api.godot_api_struct();
+            godot_api_struct_fields.extend(quote!{
+                #field: find_api_ptr(core_api_struct, #gd_api_type, #v_maj, #v_min) as *const #gd_api_struct,
             });
-            for function in &api.functions {
-                let function_name = function.rust_name();
-                let expect_message = format!(
-                    "Couldn't find function: ({}, {}, {}, {})",
-                    api.type_, gd_api_type, function_name, gd_api_struct
-                );
-                constructed_struct_fields.extend(quote! {
-                    #function_name: (*#i).#function_name.expect(#expect_message),
-                });
-            }
         }
         quote! {
             pub unsafe fn from_api_struct(core_api_struct: *const godot_gdnative_core_api_struct) -> Self {
-                #godot_apis
                 GodotApi{
-                    #constructed_struct_fields
+                    #godot_api_struct_fields
                 }
             }
         }
     }
 
-    fn field_wrapper_functions(api: &ApiRoot) -> TokenStream {
+    fn api_wrapper_functions(api: &ApiRoot) -> TokenStream {
         let mut result = TokenStream::new();
         for api in api.all_apis() {
             for function in &api.functions {
-                let wrapper_name = function.rust_name();
+                let function_name = function.rust_name();
                 let args = function.rust_args_with_types();
                 let return_type = function.rust_return_type();
-                let field_name = function.rust_name();
+                let api_struct_field = api.macro_ident();
                 let arg_names = function.rust_args_without_types();
+                let expect_msg = format!(
+                    "API function mission: {}.{}",
+                    api.godot_api_struct(),
+                    function_name
+                );
                 result.extend(quote! {
-                    pub unsafe fn #wrapper_name(&self, #args) -> #return_type {
-                        (self.#field_name)(#arg_names)
+                    pub unsafe fn #function_name(&self, #args) -> #return_type {
+                        (*self.#api_struct_field).#function_name.expect(#expect_msg)(#arg_names)
                     }
                 });
             }

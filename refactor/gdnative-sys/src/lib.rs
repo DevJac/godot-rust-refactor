@@ -27,14 +27,18 @@ unsafe fn find_api_ptr(
     for i in 0..(*core_api).num_extensions {
         let mut extension =
             *(*core_api).extensions.offset(i as _) as *const godot_gdnative_api_struct;
-        while !extension.is_null() {
-            if (*extension).type_ == api_type
-                && (*extension).version.major == version_major
-                && (*extension).version.minor == version_minor
-            {
-                return extension;
+        if (*extension).type_ == api_type {
+            while !extension.is_null() {
+                if (*extension).version.major == version_major
+                    && (*extension).version.minor == version_minor
+                    // The boolean expression below SHOULD always be true;
+                    // we will double check to be safe.
+                    && (*extension).type_ == api_type
+                {
+                    return extension;
+                }
+                extension = (*extension).next;
             }
-            extension = (*extension).next;
         }
     }
     panic!(
